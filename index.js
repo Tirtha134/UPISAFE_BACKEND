@@ -13,7 +13,7 @@ const app = express();
 
 /* MIDDLEWARE */
 app.use(cors({
-  origin: "http://localhost:5173",
+  origin: "https://upisafe-frontend.onrender.com",
   credentials: true
 }));
 
