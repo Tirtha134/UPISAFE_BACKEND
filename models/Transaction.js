@@ -33,7 +33,7 @@ const transactionSchema = new mongoose.Schema(
     type: {
       type: String,
       required: [true, "Transaction type is required"],
-      enum: ["credit", "debit"], // adjust if your ML model uses different labels
+      enum: ["PAYMENT", "RECEIVE"], 
     },
 
     Fraud_Result: {
