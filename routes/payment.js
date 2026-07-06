@@ -6,21 +6,42 @@ import authMiddleware from "../middleware/authMiddleware.js";
 
 const router = express.Router();
 
-const ML_API_URL = process.env.ML_API_URL || "http://127.0.0.1:8000/predict";
+const ML_API_URL = process.env.ML_API_URL || "http://127.0.0.1:5000/";
 
 // =========================
 // NORMALIZE TYPE HELPER
-// Accepts:  "PAYMENT", "RECEIVE", "RECEIVED", "receive", etc.
-// Returns:  "PAYMENT" | "RECEIVE"
+// Accepts: "Requested", "requested", "REQUEST" etc.
+// Returns: "Requested" | "Debited" | null (invalid)
 // =========================
 function normalizeType(raw) {
-  const val = String(raw || "").toUpperCase().trim();
-  if (val === "PAYMENT") return "PAYMENT";
-  // Accept "RECEIVE" and common mistakes like "RECEIVED"
-  if (val === "RECEIVE" || val === "RECEIVED" || val === "CREDIT") return "RECEIVE";
-  return "PAYMENT"; // safe default
+  const val = String(raw || "").trim().toLowerCase();
+  if (val === "requested" || val === "request") return "Requested";
+  if (val === "debited" || val === "debit") return "Debited";
+  return null;
 }
 
+// =========================
+// PARSE dd-mm-yyyy -> Date object (midnight)
+// =========================
+function parseDDMMYYYY(dateStr) {
+  const parts = String(dateStr || "").split("-");
+  if (parts.length !== 3) return null;
+
+  const [dd, mm, yyyy] = parts.map(Number);
+  if (!dd || !mm || !yyyy) return null;
+
+  const d = new Date(yyyy, mm - 1, dd);
+  if (d.getDate() !== dd || d.getMonth() !== mm - 1 || d.getFullYear() !== yyyy) {
+    return null; // catches invalid dates like 31-02-2026
+  }
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+
+// =========================
+// VALIDATE 24-hour HH:MM
+// =========================
+const TIME_REGEX = /^([01]\d|2[0-3]):([0-5]\d)$/;
 
 /* =========================
    ADD TRANSACTION
@@ -39,8 +60,39 @@ router.post("/add", authMiddleware, async (req, res) => {
       return res.status(400).json({ error: "Amount must be a positive number" });
     }
 
-    // Normalize type before anything else
+    // Normalize + validate type
     const normalizedType = normalizeType(type);
+    if (!normalizedType) {
+      return res.status(400).json({ error: "Type must be 'Requested' or 'Debited'" });
+    }
+
+    // Validate date format (dd-mm-yyyy)
+    const parsedDate = parseDDMMYYYY(date);
+    if (!parsedDate) {
+      return res.status(400).json({ error: "Date must be in dd-mm-yyyy format" });
+    }
+
+    // Validate time format (24hr HH:MM)
+    if (!TIME_REGEX.test(time)) {
+      return res.status(400).json({ error: "Time must be in 24-hour HH:MM format" });
+    }
+
+    // ── Type vs Date business rule ──────────────────────────────
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    if (normalizedType === "Requested" && parsedDate < today) {
+      return res.status(400).json({
+        error: "⚠️ 'Requested' payments must be for today or a future date.",
+      });
+    }
+
+    if (normalizedType === "Debited" && parsedDate > today) {
+      return res.status(400).json({
+        error: "⚠️ 'Debited' payments must be for today or a past date.",
+      });
+    }
+
     const userId = req.user._id;
 
     // ML result defaults
@@ -51,28 +103,28 @@ router.post("/add", authMiddleware, async (req, res) => {
 
     /* =========================
        CALL FLASK ML API
+       NOTE: Flask reads request.form.get(...), so this MUST be
+       sent as x-www-form-urlencoded, not JSON.
     ========================= */
     try {
-      const mlRes = await axios.post(
-        ML_API_URL,
-        {
-          upi_id,
-          amount:  parsedAmount,
-          date,
-          time,
-          type:    normalizedType,
-        },
-        {
-          headers: { "Content-Type": "application/json" },
-          timeout: 10000,
-        }
-      );
+      const params = new URLSearchParams();
+      params.append("upi_id", upi_id);
+      params.append("amount", parsedAmount);
+      params.append("date", date);   // dd-mm-yyyy string, as sent by frontend
+      params.append("time", time);   // HH:MM (24hr)
+      params.append("type", normalizedType); // "Requested" | "Debited"
+
+      const mlRes = await axios.post(ML_API_URL, params, {
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        timeout: 10000,
+      });
 
       console.log("🔥 ML RESPONSE:", mlRes.data);
 
-      Fraud_Result = Boolean(mlRes.data.Fraud_Result);
-      Risk_Score   = typeof mlRes.data.Risk_Score === "number" ? mlRes.data.Risk_Score : 0;
-      Risk_Level   = typeof mlRes.data.Risk_Level === "string" ? mlRes.data.Risk_Level : "LOW ✅";
+      // Flask returns Fraud_Result / Risk_Score as strings — convert them
+      Fraud_Result = String(mlRes.data.Fraud_Result).toLowerCase() === "true";
+      Risk_Score   = Number(mlRes.data.Risk_Score) || 0;
+      Risk_Level   = Fraud_Result ? "HIGH ⚠️" : "LOW ✅";
       mlCalled     = true;
 
     } catch (err) {
@@ -88,9 +140,9 @@ router.post("/add", authMiddleware, async (req, res) => {
     const transaction = await Transaction.create({
       upi_id,
       amount:       parsedAmount,
-      date,
-      time,
-      type:         normalizedType,   // always "PAYMENT" or "RECEIVE"
+      date,          // stored as dd-mm-yyyy
+      time,          // stored as HH:MM (24hr)
+      type:         normalizedType,   // "Requested" | "Debited"
       Fraud_Result,
       Risk_Score,
       Risk_Level,
