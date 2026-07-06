@@ -32,8 +32,8 @@ const transactionSchema = new mongoose.Schema(
 
     type: {
       type: String,
-      required: [true, "Transaction type is required"],
-      enum: ["PAYMENT", "RECEIVE"], 
+      enum: ["Requested", "Debited"],
+      required: true,
     },
 
     Fraud_Result: {
